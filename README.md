@@ -1,5 +1,6 @@
 # MIPM_arth
 A record of the UROP project in 2024 Summer
 
-.html = Guide notes with essential codes 
-files = raw code and their output
+.html = guide notes with essential codes
+
+files = corresponding raw code and their output
