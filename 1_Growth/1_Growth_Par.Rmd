@@ -1,0 +1,419 @@
+---
+title: "MIPM --- the Growth Parameter"
+subtitle: "Application to an insect population (*Aedes aegypti*)"
+date: "August 2024"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 0. Theory outline [(reference)](https://www.biorxiv.org/content/10.1101/2023.12.18.571080v1)
+
+The overall growth kernel (equation 9):
+$$ G(m',m) = m \sim N(M \left( M^{-1}(m,T_c)+t,T_c \right),h) $$
+Predict mass after a period of time, using the Ontogentic Growth Model (10):
+$$ M(t) = m_A \left( 1-(1- \left( \frac{m_0}{m_A} \right) ^{1/4})e^{-a(T)t/4m_A^{1/4}} \right)^4 $$
+Temperature dependence is introduced by:
+$$ a(T) = a(T_0) e ^ {\left( -E/kT_0^2 \right) ( T_c/(1+ ( T_c/T_0 ) ) )} $$
+To get the constant $a(T_0)$, perform a linear regression (the above equation logged):
+$$ ln(a(T)) = \left( -E/kT_0^2 \right) (T_c/(1+(T_c/T_0)))+ln(a(T_0)) $$
+In which $ln(a(T)) \propto (1/kT - 1/kT_0)$ 
+
+A series of $a(T)$ can be calculated by fitting equation (10) with development data. Then the intercept of the linear regression ($ln(a(T))$ against $1/kT - 1/kT_0$) gives $a(T_0)$ .
+
+
+## 1. Get data [(source paper)](https://doi.org/10.1093/jmedent/27.5.892)
+
+Data format needed: mass(mg)-time(day), under a range of temperatures.
+
+Definition of data from the source paper:
+  - **mass** = mean wet mass (mg) of L2-4 
+  (the time of taking size measurement was not clearly defined in the source paper, assuming both mass and head width were measured at the start of each life stage)
+  - **time** = mean number of days taken to complete each life stage.
+  - **temperature** = the environmental temperature ($^{\circ}$C) maintained after the egg is hatched. The haching temperature was 27$^{\circ}$C across all experimental groups.
+
+
+For *Aedes eagypti*, there are 5 developmental stages recorded: larval (L1, L2, L3, L4) and pupal. The mass change during eclosion (when pupa turns to adult) is negative, so stages after pupa is excluded from this calculation of development parameter. 
+
+Call packages needed:
+```{r echo=TRUE, results='hide', message=FALSE, warning=FALSE}
+library(ggplot2)
+library(ohvbd)
+library(dplyr)
+library(minpack.lm)
+library(cowplot)
+```
+
+#### **a. L1 mass prediction**
+
+The mass was not measured for L1 stage . Instead, the head width was measured across all larval stages as a size data. This section is going to predict the mass of L1, using a linear regression.
+
+Data used: mass of L2-4 and head width data of L1-4.
+
+Pull data from the database [VecTraits](https://www.vectorbyte.org/), using the package [ohvbd](https://fwimp.github.io/ohvbd/articles/retrieving-data.html):
+
+```{r}
+# size (head width & mass_mg)
+size <- search_vt_smart("DatasetID", "eq", "359") %>% 
+  get_vt_byid() %>%
+  extract_vt_data(
+    cols = c(
+      "OriginalTraitDef",
+      "OriginalTraitValue",
+      "Interactor1Stage", 
+      "Interactor1Temp"),
+  )
+
+# filter for larval mass and head width
+size<-size %>% filter(OriginalTraitDef != "mean body length", 
+                Interactor1Stage != "adult",
+                Interactor1Stage != "pupal")
+
+
+# time_day
+t_L1 <- search_vt_smart("DatasetID", "eq", "355") %>% 
+  get_vt_byid() %>%
+  extract_vt_data(
+    cols = c(
+      "OriginalTraitValue",
+      "Interactor1Stage", 
+      "Interactor1Temp"),
+  )
+
+# filter for the time_day of L1
+t_L1<-t_L1 %>% filter(Interactor1Stage == "L1", 
+                Interactor1Stage != "juvenile (not inc egg stage)")
+```
+
+Process the data. Plot ln(mass) against head width, see if there is any relationship useful for prediction.
+
+```{r}
+# separate width & mass, exclude L1 data
+lwidth<-size %>% subset(OriginalTraitDef == "mean head width") %>%
+  subset(Interactor1Stage != "L1")
+lmass<-subset(size, OriginalTraitDef == "mean wet mass")
+
+# combine to a data frame, calculate ln(mass)
+wm<-data.frame(stage=lwidth$Interactor1Stage,
+               Temp=lwidth$Interactor1Temp,
+               width=lwidth$OriginalTraitValue,
+               mass=lmass$OriginalTraitValue,
+               ln_mass=log(lmass$OriginalTraitValue))
+
+# plot to check if leaner relationship exist
+plot(wm$width, wm$ln_mass)
+```
+
+A linear relationship seems exist between **ln(mass)** and **head width**. 
+
+[Within a single life stage, the data exhibit its own linear relationship slightly different from the overall one. The stage-specific slopes decrease from L2 to L4, so that of L2 was assumed to better predict L1 size. This attempt of using L2-specific, instead of overall, linear model failed in following steps. The **overall** linear relationship is used here.]
+
+Linear regression model fitting:
+
+```{r}
+# fit the linear model
+wm_fit<-lm(ln_mass~width, data=wm)
+
+#plot to check
+wm_p<-ggplot(aes(width, ln_mass), data = wm)+
+  geom_point()+
+  geom_line(aes( y=predict(wm_fit)))
+plot(wm_p)
+```
+
+Use the linear model to predict L1 masses, then generate a L1 data frame.
+
+```{r}
+# predict L1 mass
+L1<-size %>% subset(OriginalTraitDef == "mean head width") %>%
+  subset(Interactor1Stage == "L1")
+w_L1<-data.frame(width=L1$OriginalTraitValue)
+ln_mass<-predict(wm_fit, newdata=w_L1)
+wm_L1<-cbind(w_L1,ln_mass)
+L1$mass<-exp(wm_L1$ln_mass)
+
+
+# output L1 data frame (convert mass unit, mg>g)
+L1_pre<-data.frame(stage=L1$Interactor1Stage,
+                   time=t_L1$OriginalTraitValue,
+                   mass=(L1$mass)/1000,
+                   Temp=L1$Interactor1Temp)
+
+```
+
+
+#### **b. Data loading and processing**
+
+Pull mass and time data, excluding L1 stage.
+
+```{r}
+# mass data
+m <- search_vt_smart("DatasetID", "eq", "359") %>% 
+  get_vt_byid() %>%
+  extract_vt_data(
+    cols = c(
+      "OriginalTraitValue",
+      "OriginalTraitUnit",
+      "Interactor1Stage", 
+      "Interactor1Temp"),
+  )
+# subset for only mass data
+# exclude adult because their mass decreases
+m<-m %>% filter(OriginalTraitUnit == "mg", Interactor1Stage != "adult")
+
+
+# time data
+t <- search_vt_smart("DatasetID", "eq", "355") %>% 
+  get_vt_byid() %>%
+  extract_vt_data(
+    cols = c(
+      "OriginalTraitValue",
+      "Interactor1Stage", 
+      "Interactor1Temp"),
+  )
+t<-t %>% filter(Interactor1Stage != "L1", 
+                Interactor1Stage != "juvenile (not inc egg stage)")
+```
+
+Combine the pulled data and predicted L1 data into a single data frame.
+
+```{r}
+# new dataframe
+time<-t$OriginalTraitValue
+# convert mass unit, mg>g
+mass<-(m$OriginalTraitValue)/1000
+Temp<-m$Interactor1Temp
+stage<-t$Interactor1Stage
+df<-data.frame(stage, time, mass, Temp)
+
+# combine L1 and others
+df_ogm<-rbind(L1_pre, df)
+
+```
+
+
+
+## 2. Calculate $a(T)$s
+
+#### **a. Subset and process**
+
+Standardize the time at each L1 mass as 0.
+
+Subset the mass-time data frame into 6 groups, according to temperatures.
+
+```{r}
+# set L1 time to 0
+df_ogm$time[1:6]<-0
+
+# subset data into different temperatures ####
+t15<-subset(df_ogm, Temp==15)
+t20<-subset(df_ogm, Temp==20)
+t25<-subset(df_ogm, Temp==25)
+t27<-subset(df_ogm, Temp==27)
+t30<-subset(df_ogm, Temp==30)
+t34<-subset(df_ogm, Temp==34)
+
+# get cumulative time columns ####
+t15$Time<-cumsum(t15$time)
+t20$Time<-cumsum(t20$time)
+t25$Time<-cumsum(t25$time)
+t27$Time<-cumsum(t27$time)
+t30$Time<-cumsum(t30$time)
+t34$Time<-cumsum(t34$time)
+```
+
+#### **b. OGM fitting**
+
+Using equation 10 mentioned in section 0.
+
+Parameter definitions:
+  - t = time
+  - m0 = the minimum mass
+  - mA = the asymptotic / maximum mass
+  - t0 = added constant to account for growth rate from different starting body masses.
+  - a = temperature dependent parameter
+
+The mA (asymptotic mass) values used below are not based on any real experiment, they are estimated (made up) to make the model curve fit the data used.
+
+```{r}
+# ogm function 
+ogm <- function(t, a, t0, m0 = 0.0002, mA){ 
+  #t: time in days from above function, Tc: temp degrees celsius, t0: normalisation constant, a: slope, alpha=-E/kT_0^2
+  k <- 8.62*(10^(-5))
+  m <- mA * ( 1- (1-((m0/mA)^0.25)) * (exp(-a*(t+t0)/(4*(mA^0.25))) )) ^4
+  return(m) #mass reached after amount of time t
+}
+
+# fit with estimated mA from plot ####
+ogm_nls_15<- nls(mass ~ ogm(t = Time, a, t0, mA=0.0093),
+                 data=t15, start=list(a = 0.01, t0 = 0) )
+ogm_nls_20<- nls(mass ~ ogm(t = Time, a, t0, mA=0.0075),
+                 data=t20, start=list(a = 0.01, t0 = 0) )
+ogm_nls_25<- nls(mass ~ ogm(t = Time, a, t0, mA=0.005),
+                 data=t25, start=list(a = 0.01, t0 = 0) )
+ogm_nls_27<- nls(mass ~ ogm(t = Time, a, t0, mA=0.0045),
+                 data=t27, start=list(a = 0.01, t0 = 0) )
+ogm_nls_30<- nls(mass ~ ogm(t = Time, a, t0, mA=0.0043),
+                 data=t30, start=list(a = 0.01, t0 = 0) )
+ogm_nls_34<- nls(mass ~ ogm(t = Time, a, t0, mA=0.0041),
+                 data=t34, start=list(a = 0.01, t0 = 0) )
+```
+
+Cehck fitting with plot:
+
+```{r, echo=FALSE}
+p15<-ggplot(aes(Time, mass), data = t15)+
+  geom_point()+
+  geom_line(aes( y=predict(ogm_nls_15)))
+p20<-ggplot(aes(Time, mass), data = t20)+
+  geom_point()+
+  geom_line(aes( y=predict(ogm_nls_20)))
+p25<-ggplot(aes(Time, mass), data = t25)+
+  geom_point()+
+  geom_line(aes( y=predict(ogm_nls_25)))
+p27<-ggplot(aes(Time, mass), data = t27)+
+  geom_point()+
+  geom_line(aes( y=predict(ogm_nls_27)))
+p30<-ggplot(aes(Time, mass), data = t30)+
+  geom_point()+
+  geom_line(aes( y=predict(ogm_nls_30)))
+p34<-ggplot(aes(Time, mass), data = t34)+
+  geom_point()+
+  geom_line(aes( y=predict(ogm_nls_34)))
+
+plot_grid(p15,p20,p25,p27,p30,p34)
+
+```
+
+Because the input data points are limited in number, the prediction generated might not look well (zig-zag/not perfect fit), further check of model-fitting can be done with more values given to prediction.
+
+
+#### **c. Get a at each temperature**
+
+Extract the coefficient ($a(T)$) of the fit from each temperature. Output a data frame of a-temperature.
+
+```{r}
+#Boltzmann's constant
+k<- 8.62*(10^(-5)) 
+#parameter a from fits to data
+a<-c(coef(ogm_nls_15)[1], coef(ogm_nls_20)[1], coef(ogm_nls_25)[1], coef(ogm_nls_27)[1], coef(ogm_nls_30)[1], coef(ogm_nls_34)[1])
+#Time elapsed
+t0<-c(coef(ogm_nls_15)[2], coef(ogm_nls_20)[2], coef(ogm_nls_25)[2], coef(ogm_nls_27)[2], coef(ogm_nls_30)[2], coef(ogm_nls_34)[2])
+#Temperature
+temps<-unique(df_ogm$Temp)
+ats<-as.data.frame(cbind(a, t0, temps))
+# check by plot a~temp (should look like a TPC curve)
+plot(ats$temps, ats$a)
+
+```
+
+The plot shows that $15 \sim 27 ^{\circ} C$ is the activating part of the unimodal pattern of a TPC curve.
+Therefore these first 4 points are used for calculation of $a(T_0)$ using linear regression.
+
+## 3. Get $a(T_0)$, simulate development curve
+
+The last step is to calculate the constant needed ($a(T_0)$), and do a simple simulation to check its reliability.
+
+#### **a. $a(T_0)$**
+
+Transform $a$ and $T$, so the linear regression gives $-E$ as its slope and $ln(a(T_0))$ as its intercept.
+
+```{r}
+#Inverse temperature
+ats$inversetemp<- (1/( k * (ats$temps +273))) - (1/( k * (273)))
+
+# linear regration
+aiT_fit<-lm(log(ats$a)~ats$inversetemp)
+summary(aiT_fit)
+# visualize
+plot(ats$inversetemp, log(ats$a))
+abline(lm(log(ats$a)~ats$inversetemp), col="blue")
+# get at0
+at0<-exp(coef(aiT_fit)[1])
+at0
+```
+
+#### **b. Simulation**
+
+Now the constant growth parameter $a(T_0)$ is calculated, a simulation can help checking its reliability.
+
+Differing from step 2b, the mA value used for simulation is realistic--the maximum mass recorded in the [paper of data source](https://doi.org/10.1093/jmedent/27.5.892).
+
+Basic function 
+[(equation 10)](https://www.biorxiv.org/content/10.1101/2023.12.18.571080v1):
+
+```{r}
+# Mass reached over developmental time NEW
+development_mass <- function(t, Tc, at0, m0 = 0.0002, M = 0.00598, E = 0.45){ #t: time in days from above function, Tc: temp degrees celsius, t0: normalisation constant, a: slope, alpha=-E/kT_0^2
+  k <- 8.62*(10^(-5))
+  alpha = E/(k*(273^2)) 
+  a_temp<- at0 * exp(alpha* (Tc/(1+(Tc/273))) )
+  m <- M * ( 1- (1-((m0/M)^0.25)) * (exp(-a_temp*t/(4*(M^0.25))) )) ^4
+  return(m) #mass reached after amount of time t
+}
+```
+
+Simulator function:
+
+The tEnd (end time of simulation) is set close to the maximum development time recorded in the source paper.
+```{r}
+# simulatior function -> t-m, fixed temp.
+G_sim<-function(Tc, at0 = 0.01317569, dt = 1, tEnd = 60, mStart = 0.00022){
+  # empty lists storing simulation values
+  timeVec<-c(0)
+  massVec<-c(0.0002)
+  # initial time
+  t<-0
+  
+  # set simulation loop limit
+  while(t<tEnd){
+    # calculate new values
+    t<-t+dt
+    m<-development_mass(t, Tc, at0)
+    # replace old variable
+    mStart<-m
+    # record new values
+    timeVec<-c(timeVec, t)
+    massVec<-c(massVec, m)
+    }
+  result<-data.frame(timeVec, massVec)
+  return(result)
+  }
+```
+
+Visualize:
+```{r}
+# simulate under a range of temp
+s10<-G_sim(10)
+s15<-G_sim(15)
+s20<-G_sim(20)
+s25<-G_sim(25)
+s30<-G_sim(30)
+s35<-G_sim(35)
+
+# plot
+plot(s35$timeVec,log(s35$massVec), col="red3", lwd=2, type = "l",
+     xlab="Time (day)", ylab="ln_mass (g)")
+lines(s15$timeVec,log(s15$massVec), col="cyan3", lwd=2)
+lines(s20$timeVec,log(s20$massVec), col="green3", lwd=2)
+lines(s25$timeVec,log(s25$massVec), col="pink2", lwd=2)
+lines(s30$timeVec,log(s30$massVec), col="orange2", lwd=2)
+lines(s10$timeVec,log(s10$massVec), col="blue", lwd=2)
+leg<-legend("bottomright",
+            legend=c("10","15","20","25","30","35"),
+            col=c("blue","cyan3","green3","pink2","orange2","red3"),
+            pch=15,
+            ncol=2)
+
+```
+
+## 4. Further thoughts
+
+- Could use only the first 4 values of a(T) for a(T_0) calculation, as they make a better linear relationship.
+
+- Compare the calculation result with other studies.
